@@ -32,7 +32,7 @@ class State:
 # Graph Variables
 
 head = None  # for a block to be added (and become head), parent must be head and uncle must be in orphans
-root = None  # this is the genesis block
+root = None
 orphans = set()  # for a block to be added (that's not head), parent and uncle must be in orphans
 state = State()
 block_index = {}
@@ -43,34 +43,6 @@ block_index = {}
 port = 2281
 seeds = [('xk.io', port)]
 p2p = Spore(seeds, ('0.0.0.0', port))
-
-
-# Helpers
-
-def is_32_bytes(i):
-    return 0 < i < 256 ** 32
-
-
-def is_4_bytes(i):
-    return 0 < i < 256 ** 4
-
-
-def global_hash(msg: bytes):
-    return int(sha256(msg).hexdigest(), 16)
-
-
-def hash_block(block: QuantaBlock):
-    return global_hash(bytes(block.to_json()))
-
-
-def target_to_diff(target):
-    return DIFF_ONE // target
-
-
-# Crypto Helpers
-
-def valid_secp256k1_signature(x, y, msg, r, s):
-    return ecdsa.verify(ecdsa.generator_secp256k1, (x, y), global_hash(msg), (r, s))
 
 
 # Associated Structures
@@ -118,10 +90,10 @@ class QuantaBlock(Encodium):
     nonce = Integer.Definition()
 
     def check(s, changed_attributes):
-        assert False not in map(is_32_bytes, [s.parent_hash, s.target, s.tx_hash, s.coinbase])
+        assert False not in map(is_32_bytes, [s.parent_hash, s.target, s.coinbase])
         if s.uncle_hash != None: assert is_32_bytes(s.uncle_hash)
         assert False not in map(is_4_bytes, [s.timestamp, s.nonce])
-        assert s.target < (DIFF_ONE // (256 ** 4))
+        assert s.target < (DIFF_ONE // (256 ** 3))
         assert coins_generated(s) >= 0
         assert s.hash < s.target
 
@@ -190,7 +162,9 @@ def process_blocks(blocks):
 
 def _process_block(block):
     if block.parent_hash not in block_index or (block.uncle is not None and block.uncle not in block_index):
-        pass
+        return
+    if block.hash in block_index:
+        return
     block.set_parent(block_index[block.parent_hash])
     if block.uncle_hash is not None: block.set_uncle(block_index[block.uncle_hash])
     if better_than_head(block):
@@ -262,6 +236,35 @@ def storage_fee(block):
     return len(block.to_json()) * FEE_CONSTANT
 
 
+# Helpers
+
+def is_32_bytes(i):
+    return 0 <= i < 256 ** 32
+
+
+def is_4_bytes(i):
+    return 0 <= i < 256 ** 4
+
+
+def global_hash(msg: bytes):
+    return int(sha256(msg).hexdigest(), 16)
+
+
+def hash_block(block: QuantaBlock):
+    return global_hash(bytes(block.serialize()))
+
+
+def target_to_diff(target):
+    return DIFF_ONE // target
+
+
+# Crypto Helpers
+
+def valid_secp256k1_signature(x, y, msg, r, s):
+    return ecdsa.verify(ecdsa.generator_secp256k1, (x, y), global_hash(msg), (r, s))
+
+
+
 # Messages
 
 class BlockList(Encodium):
@@ -295,6 +298,10 @@ def respond_to_push(peer, block_list):
 def respond_to_pull(peer, block_request):
     global block_index
     try:
-        peer.send(PUSHBLOCKS, BlockList(blocks=order_from(block_index[block_request.start_hash], block_index[block_request.end_hash])))
+        peer.send(PUSHBLOCKS, BlockList(
+            blocks=order_from(block_index[block_request.start_hash], block_index[block_request.end_hash])))
     except:
         peer.disconnect()
+
+
+root = QuantaBlock(parent_hash=0, target=(DIFF_ONE // (256 ** 3) - 1), coinbase=0, timestamp=0, nonce=1901667)  # this is the genesis block
