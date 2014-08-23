@@ -307,7 +307,7 @@ def storage_fee(block):
 # P2P Setup
 
 port = 2281
-seeds = [('xk.io', port)]
+seeds = [('198.199.102.43', port)]
 p2p = Spore(seeds, ('0.0.0.0', port))
 
 # P2P Messages
@@ -345,33 +345,33 @@ class InfoProvide(Encodium):
 
 # Message Handlers
 
-@p2p.on_message(BLOCK_ANNOUNCE, BlockAnnounce)
+@p2p.on_message(BLOCK_ANNOUNCE, BlockAnnounce.from_json)
 def handle_block_announce(peer, announcement):
     graph.add_blocks([announcement.block])
     p2p.broadcast(BLOCK_ANNOUNCE, announcement)
 
-@p2p.on_message(BLOCK_REQUEST, BlockRequest)
+@p2p.on_message(BLOCK_REQUEST, BlockRequest.from_json)
 def handle_block_request(peer, request):
     peer.send(BLOCK_PROVIDE, BlockProvide(blocks=[graph.get_block(h) for h in request.hashes]))
 
-@p2p.on_message(BLOCK_PROVIDE, BlockProvide)
+@p2p.on_message(BLOCK_PROVIDE, BlockProvide.from_json)
 def handle_block_provide(peer, provided):
     graph.add_blocks(provided.blocks)
 
-@p2p.on_message(INV_REQUEST, InvRequest)
+@p2p.on_message(INV_REQUEST, InvRequest.from_json)
 def handle_inv_request(peer, request):
     peer.send(INV_PROVIDE, InvProvide(inv_list=[b.hash for b in graph.all_nodes]))
 
-@p2p.on_message(INV_PROVIDE, InvProvide)
+@p2p.on_message(INV_PROVIDE, InvProvide.from_json)
 def handle_inv_provide(peer, provided):
     to_request = [i for i in provided.inv_list if i not in graph.all_nodes]
     peer.send(BLOCK_REQUEST, BlockRequest(hashes=to_request))
 
-@p2p.on_message(INFO_REQUEST, InfoRequest)
+@p2p.on_message(INFO_REQUEST, InfoRequest.from_json)
 def handle_info_request(peer, request):
     peer.send(INFO_PROVIDE, InfoProvide(top_block=graph.head.hash))
 
-@p2p.on_message(INFO_PROVIDE, InfoProvide)
+@p2p.on_message(INFO_PROVIDE, InfoProvide.from_json)
 def handle_info_provide(peer, provided):
     if provided.top_block not in graph.all_nodes:
         peer.send(INV_REQUEST, InvRequest())

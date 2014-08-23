@@ -4,10 +4,11 @@ from quanta import *
 
 class Miner:
 
-    def __init__(self, graph=None, run_forever=False):
+    def __init__(self, graph=None, p2p=None, run_forever=False):
         self._graph = graph
         self._special_nonce = 1234567890
         self._run_forever = run_forever
+        self._p2p = p2p
 
     def set_graph(self, graph):
         self._graph = graph
@@ -48,7 +49,8 @@ class Miner:
             nonce += 1
             if nonce % 100000 == 0: print(nonce)
         if candidate.acceptable_work:
-            self._graph.add_blocks([candidate])
+            if self._graph: self._graph.add_blocks([candidate])
+            if self._p2p: self._p2p.broadcast(BLOCK_ANNOUNCE, BlockAnnounce(block=candidate))
         self._running = False
 
         if self._run_forever and not self._stop:
