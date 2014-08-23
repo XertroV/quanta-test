@@ -9,41 +9,62 @@ from encodium import *
 
 # Constants
 
-PUSHBLOCKS = 'pushblocks'
-PULLBLOCKS = 'pullblocks'
-
-DIFF_ONE = 2 ** 256 - 1
+DIFF_ONE = MAX_32_BYTE_INT = 256 ** 32 - 1
+MAX_8_BYTE_INT = 256 ** 8 - 1
 
 FEE_CONSTANT = 10000  # 8000000  # Arbitrary-ish
 
+# Exceptions
+
+class InvalidBlock(Exception):
+    pass
+
+# Structs
+
+class Integer32Bytes(Encodium):
+    class Definition(Encodium.Definition):
+        _encodium_type = int
+
+        def check_value(self, value):
+            return 0 <= value < MAX_32_BYTE_INT
+
+ECPoint = Target = Hash = Integer32Bytes
+
+class Integer8Bytes(Encodium):
+    class Definition(Encodium.Definition):
+        _encodium_type = int
+
+        def check_value(self, value):
+            return 0 <= value < MAX_8_BYTE_INT
+
+MoneyAmount = Timestamp = Nonce = Integer8Bytes
 
 # State
 
 class State:
+    """ Super simple state device.
+    Only functions are to add or subtract coins, and no checking is involved.
+    All accounts are of 0 balance to begin with.
+    """
     def __init__(self):
         self._state = {}
 
     def get(self, pub_x):
         return 0 if pub_x not in self._state else self._state[pub_x]
 
-    def move_coins(self, pub_x, value):
+    def modify_balance(self, pub_x, value):
         self._state[pub_x] = self.get(pub_x) + value
-
 
 # Graph Variables
 
 class Graph:
-    def __init__(self):
-        self.head = None  # for a block to be added (and become head), parent must be head and uncle must be in orphans
-        self.root = None
-        self.orphans = set()  # for a block to be added (that's not head), parent and uncle must be in orphans
-        self.state = State()
-        self.block_index = {}
-
-    def set_root(self, root):
-        if self.head == None: self.head = root
+    def __init__(self, root):
         self.root = root
-        self._add_block(self.root, is_root=True)
+        self.head = self.root
+        self.orphans = set()
+        self.all_nodes = {self.root}
+        self.state = State()
+        self.block_index = {self.root.hash: self.root}
         self.apply_to_state(self.root)
 
     def _back_up_state(self):
@@ -52,30 +73,43 @@ class Graph:
     def _restore_backed_up_state(self):
         self.state = self.backup_state
 
-    def have_block(self, block_hash):
+    def has_block(self, block_hash):
         return block_hash in self.block_index
 
+    def get_block(self, block_hash):
+        return self.block_index[block_hash]
+
     def add_blocks(self, blocks):
+        rejects = []
         self._back_up_state()
         try:
-            for block in blocks: self._add_block(block)
+            for block in blocks:
+                r = self._add_block(block)
+                if r is not None:
+                    rejects.append(r)
+            if rejects != blocks:
+                self.add_blocks(rejects)
         except Exception as e:
-            raise e
             self._restore_backed_up_state()
 
-    def _add_block(self, block, is_root=False):
-        if not is_root:
-            if self.have_block(block.hash):
-                return 'Already have block'
-            if not self.have_block(block.parent_hash) or (block.uncle_hash is not None and not self.have_block(block.uncle_hash)):
-                return 'Absent parent / uncle'
-            block.set_parent(self.block_index[block.parent_hash])
-            if block.uncle_hash is not None: block.set_uncle(block_index[block.uncle_hash])
-            if self.better_than_head(block):
-                self.reorganize_to(block)
-            else:
-                self.orphans.add(block)
+    def _add_block(self, block):
+        """
+        :param block: QuantaBlock instance
+        :return: None on success, block if parent missing
+        """
+        if self.has_block(block.hash): return None
+        if not block.acceptable_work: raise InvalidBlock('Unacceptable work')
+        if not self.has_block(block.parent_hash) or (block.uncle_hash is not None and not self.has_block(block.uncle_hash)):
+            return block
+        block.set_parent(self.block_index[block.parent_hash])
+        if block.uncle_hash is not None: block.set_uncle(self.block_index[block.uncle_hash])
+        if self.better_than_head(block):
+            self.reorganize_to(block)
+        else:
+            self.orphans.add(block)
+        self.all_nodes.add(block)
         self.block_index[block.hash] = block
+        return None
 
     def reorganize_to(self, block):
         print('reorg to', block.hash, 'from', self.head.hash)
@@ -91,17 +125,18 @@ class Graph:
         return self.state.get(block.tx.signature.pub_x) >= block.tx.value
 
     def apply_to_state(self, block):
-        self.modify_state(block, 1)
+        assert self.valid_for_state(block)
+        self._modify_state(block, 1)
 
     def unapply_to_state(self, block):
-        self.modify_state(block, -1)
+        self._modify_state(block, -1)
 
-    def modify_state(self, block, direction):
+    def _modify_state(self, block, direction):
         assert direction in [-1, 1]
         if block.tx is not None:
-            self.state.move_coins(block.tx.recipient, direction * block.tx.value)
-            self.state.move_coins(block.tx.signature.pub_x, -1 * direction * block.tx.value)
-        self.state.move_coins(block.coinbase, direction * block.coins_generated)
+            self.state.modify_balance(block.tx.recipient, direction * block.tx.value)
+            self.state.modify_balance(block.tx.signature.pub_x, -1 * direction * block.tx.value)
+        self.state.modify_balance(block.coinbase, direction * block.coins_generated)
 
     def mass_unapply(self, path):
         for block in path[::-1]:
@@ -110,7 +145,6 @@ class Graph:
 
     def mass_apply(self, path):
         for block in path:
-            assert self.valid_for_state(block)
             self.apply_to_state(block)
             if block in self.orphans: self.orphans.remove(block)
 
@@ -121,15 +155,14 @@ class Graph:
 
     @staticmethod
     def order_from(early_node, late_node, carry=None):
-        if not carry: carry = []
+        carry = [] if not carry else carry
         if early_node == late_node:
             return [late_node]
         if late_node.parent_hash == 0:
             raise Exception('Root block encountered unexpectedly while ordering graph')
-        order = exclude_from(Graph.order_from(early_node, late_node.parent), carry)
-        if late_node.uncle is not None:
-            order += exclude_from(Graph.order_from(early_node, late_node.uncle), carry + order)
-        return order + [late_node]
+        main_path = exclude_from(Graph.order_from(early_node, late_node.parent), carry)
+        aux_path = exclude_from(Graph.order_from(early_node, late_node.uncle), carry + main_path) if late_node.uncle is not None else []
+        return main_path + aux_path + [late_node]
 
     @staticmethod
     def find_pivot(b1, b2):
@@ -139,27 +172,16 @@ class Graph:
                 return past_block
         return None  # should probably not return None but do something else useful
 
-
-graph = Graph()
-
-# P2P
-
-port = 2281
-seeds = [('xk.io', port)]
-p2p = Spore(seeds, ('0.0.0.0', port))
-
-
 # Associated Structures
 
 class Signature(Encodium):
-    r = Integer.Definition()
-    s = Integer.Definition()
-    pub_x = Integer.Definition()
-    pub_y = Integer.Definition()
-    msg_hash = Integer.Definition()
+    r = ECPoint.Definition()
+    s = ECPoint.Definition()
+    pub_x = ECPoint.Definition()
+    pub_y = ECPoint.Definition()
+    msg_hash = Hash.Definition()
 
     def check(s, changed_attributes):
-        assert False not in map(is_32_bytes, [s.r, s.s, s.pub_x, s.pub_y, s.msg_hash])
         assert valid_secp256k1_signature(s.pub_x, s.pub_y, s.msg_hash, s.r, s.s)
 
     @classmethod
@@ -171,48 +193,35 @@ class Signature(Encodium):
 
 
 class Transaction(Encodium):
-    value = Integer.Definition()
-    recipient = Integer.Definition()
+    value = MoneyAmount.Definition()
+    recipient = ECPoint.Definition()
     signature = Signature.Definition()
-
-    def check(self, changed_attributes):
-        assert is_4_bytes(self.value)
-        assert is_32_bytes(self.recipient)
 
 
 # Block structure
 
 class QuantaBlock(Encodium):
-    # Encodium
-
-    parent_hash = Integer.Definition()
-    uncle_hash = Integer.Definition(optional=True)
-    target = Integer.Definition()
+    parent_hash = Hash.Definition()
+    uncle_hash = Hash.Definition(optional=True)
+    target = Target.Definition()
     tx = Transaction.Definition(optional=True)
-    coinbase = Integer.Definition()
-    timestamp = Integer.Definition()
-    nonce = Integer.Definition()
+    coinbase = ECPoint.Definition()
+    timestamp = Timestamp.Definition()
+    nonce = Nonce.Definition()
+
+    def __init__(self, *args, **kwargs):
+        self._sigmadiff = None
+        self._primary_chain = None
+        self.parent = None
+        self.uncle = None
+        super().__init__(*args, **kwargs)
 
     def __hash__(self):
         return self.hash
 
     def check(s, changed_attributes):
-        assert False not in map(is_32_bytes, [s.parent_hash, s.target, s.coinbase])
-        if s.uncle_hash != None: assert is_32_bytes(s.uncle_hash)
-        assert False not in map(is_4_bytes, [s.timestamp, s.nonce])
-        assert s.target < (DIFF_ONE // (256 ** 3))
-        assert s.coins_generated >= 0
-
-        s.init()
-
-    # Setup
-
-    def init(self):
-        self._sigmadiff = None
-        self._primary_chain = None
-        self._mining = False
-        self.parent = None
-        self.uncle = None
+        assert s.target < (DIFF_ONE // (256 ** 2))  # this is somewhat implied through the below
+        assert s.coins_generated >= 0  # coins_generated and the assoc. fee can implicitly set an upper bound on the target
 
     # Graph
 
@@ -261,13 +270,14 @@ class QuantaBlock(Encodium):
 def is_32_bytes(i):
     return 0 <= i < 256 ** 32
 
-
 def is_4_bytes(i):
     return 0 <= i < 256 ** 4
 
+def all_true(f, l):
+    return False not in map(f, l)
 
 def global_hash(msg: bytes):
-    return int(sha256(msg).hexdigest(), 16)
+    return int.from_bytes(sha256(msg).digest(), 'big')
 
 
 def hash_block(block: QuantaBlock):
@@ -294,37 +304,80 @@ def storage_fee(block):
     return len(block.to_json()) * FEE_CONSTANT
 
 
-# Messages
+# P2P Setup
 
-class BlockList(Encodium):
-    blocks = List.Definition(QuantaBlock.Definition())
+port = 2281
+seeds = [('xk.io', port)]
+p2p = Spore(seeds, ('0.0.0.0', port))
 
+# P2P Messages
+
+BLOCK_ANNOUNCE = 'block_announce'
+BLOCK_REQUEST = 'block_request'
+BLOCK_PROVIDE = 'block_provide'
+INV_REQUEST = 'inv_request'
+INV_PROVIDE = 'inv_provide'
+INFO_REQUEST = 'info_request'
+INFO_PROVIDE = 'info_provide'
+
+# Message Containers
+
+class BlockAnnounce(Encodium):
+    block = QuantaBlock.Definition()
 
 class BlockRequest(Encodium):
-    start_hash = Integer.Definition()
-    end_hash = Integer.Definition()
+    hashes = List.Definition(Hash.Definition())  # blocks we're requesting
 
-    def check(self, changed_attributes):
-        assert False not in map(is_32_bytes, [self.start_hash, self.end_hash])
+class BlockProvide(Encodium):
+    blocks = List.Definition(QuantaBlock.Definition())
 
+class InvRequest(Encodium):
+    pass
+
+class InvProvide(Encodium):
+    inv_list = List.Definition(Hash.Definition())
+
+class InfoRequest(Encodium):
+    pass
+
+class InfoProvide(Encodium):
+    top_block = Hash.Definition()
 
 # Message Handlers
 
-@p2p.on_message(PUSHBLOCKS, BlockList)
-def respond_to_push(peer, block_list):
-    graph.add_blocks(block_list.blocks)
+@p2p.on_message(BLOCK_ANNOUNCE, BlockAnnounce)
+def handle_block_announce(peer, announcement):
+    graph.add_blocks([announcement.block])
+    p2p.broadcast(BLOCK_ANNOUNCE, announcement)
 
+@p2p.on_message(BLOCK_REQUEST, BlockRequest)
+def handle_block_request(peer, request):
+    peer.send(BLOCK_PROVIDE, BlockProvide(blocks=[graph.get_block(h) for h in request.hashes]))
 
-@p2p.on_message(PULLBLOCKS, BlockRequest)
-def respond_to_pull(peer, block_request):
-    global block_index
-    try:
-        peer.send(PUSHBLOCKS, BlockList(
-            blocks=Graph.order_from(block_index[block_request.start_hash], block_index[block_request.end_hash])))
-    except:
-        peer.disconnect()
+@p2p.on_message(BLOCK_PROVIDE, BlockProvide)
+def handle_block_provide(peer, provided):
+    graph.add_blocks(provided.blocks)
 
+@p2p.on_message(INV_REQUEST, InvRequest)
+def handle_inv_request(peer, request):
+    peer.send(INV_PROVIDE, InvProvide(inv_list=[b.hash for b in graph.all_nodes]))
 
-graph.set_root(QuantaBlock(parent_hash=0, target=(DIFF_ONE // (256 ** 3) - 1), coinbase=0, timestamp=0,
-                   nonce=1901667))  # this is the genesis block
+@p2p.on_message(INV_PROVIDE, InvProvide)
+def handle_inv_provide(peer, provided):
+    to_request = [i for i in provided.inv_list if i not in graph.all_nodes]
+    peer.send(BLOCK_REQUEST, BlockRequest(hashes=to_request))
+
+@p2p.on_message(INFO_REQUEST, InfoRequest)
+def handle_info_request(peer, request):
+    peer.send(INFO_PROVIDE, InfoProvide(top_block=graph.head.hash))
+
+@p2p.on_message(INFO_PROVIDE, InfoProvide)
+def handle_info_provide(peer, provided):
+    if provided.top_block not in graph.all_nodes:
+        peer.send(INV_REQUEST, InvRequest())
+
+# Create graph
+
+genesis_block = QuantaBlock(parent_hash=0, target=(DIFF_ONE // (256 ** 3) - 1), coinbase=0, timestamp=0, nonce=1901667)
+graph = Graph(genesis_block)
 
