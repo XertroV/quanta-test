@@ -47,7 +47,7 @@ class Miner:
                 candidate = QuantaBlock.from_json(serd_block_from_nonce(nonce).decode())
                 break
             nonce += 1
-            if nonce % 100000 == 0: print(nonce)
+            # if nonce % 100000 == 0: print(nonce)
         if candidate.acceptable_work:
             if self._graph: self._graph.add_blocks([candidate])
             if self._p2p: self._p2p.broadcast(BLOCK_ANNOUNCE, BlockAnnounce(block=candidate))

@@ -376,8 +376,11 @@ def handle_info_provide(peer, provided):
     if provided.top_block not in graph.all_nodes:
         peer.send(INV_REQUEST, InvRequest())
 
+@p2p.on_connect
+def handle_connect(peer):
+    peer.send(INFO_REQUEST, InfoRequest())
+
 # Create graph
 
 genesis_block = QuantaBlock(parent_hash=0, target=(DIFF_ONE // (256 ** 3) - 1), coinbase=0, timestamp=0, nonce=1901667)
 graph = Graph(genesis_block)
-
