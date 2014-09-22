@@ -1,5 +1,6 @@
 from hashlib import sha256
 from copy import deepcopy
+from queue import PriorityQueue
 
 import pycoin.ecdsa as ecdsa
 from spore import Spore
@@ -16,8 +17,7 @@ FEE_CONSTANT = 10000  # 8000000  # Arbitrary-ish
 
 # Exceptions
 
-class InvalidBlock(Exception):
-    pass
+InvalidBlockException = BlockNotFoundException = Exception
 
 # Structs
 
@@ -55,13 +55,60 @@ class State:
     def modify_balance(self, pub_x, value):
         self._state[pub_x] = self.get(pub_x) + value
 
+# Graph Datastructs
+
+class Orphanage:
+    """ An Orphanage holds orphans.
+    It acts as a priority queue, through put(), get(), etc. This is sorted by sigmadiff.
+    For membership it acts as a set.
+    """
+    def __init__(self):
+        self._priority_queue = PriorityQueue()
+        self._set = set()
+        self._removed = set()
+
+    def __contains__(self, item):
+        return False if item in self._removed else item in self._set
+
+    def remove(self, block):
+        if block not in self._set or block in self._removed:
+            raise BlockNotFoundException()
+        self._set.remove(block)
+        self._removed.add(block)
+
+    def _put_block(self, block):
+        self._priority_queue.put((block.sigmadiff, block))
+
+    def put(self, block):
+        self._put_block(block)
+        self._set.add(block)
+        if block in self._removed:
+            self._removed.remove(block)
+
+    def _get_next_block(self):
+        sigmadiff, block = self._priority_queue.get()
+        while block in self._removed:
+            sigmadiff, block = self._priority_queue.get()
+        return sigmadiff, block
+
+    def get(self):
+        _, block = self._get_next_block()
+        self._set.remove(block)
+        return block
+
+    def visit(self):
+        sigmadiff, block = self._get_next_block()
+        self._put_block(block)
+        return block
+
+
 # Graph Variables
 
 class Graph:
     def __init__(self, root):
         self.root = root
         self.head = self.root
-        self.orphans = set()
+        self.orphans = Orphanage()
         self.all_nodes = {self.root}
         self.state = State()
         self.block_index = {self.root.hash: self.root}
@@ -98,7 +145,7 @@ class Graph:
         :return: None on success, block if parent missing
         """
         if self.has_block(block.hash): return None
-        if not block.acceptable_work: raise InvalidBlock('Unacceptable work')
+        if not block.acceptable_work: raise InvalidBlockException('Unacceptable work')
         if not self.has_block(block.parent_hash) or (block.uncle_hash is not None and not self.has_block(block.uncle_hash)):
             return block
         block.set_parent(self.block_index[block.parent_hash])
@@ -106,13 +153,13 @@ class Graph:
         if self.better_than_head(block):
             self.reorganize_to(block)
         else:
-            self.orphans.add(block)
+            self.orphans.put((block.sigmadiff, block))
         self.all_nodes.add(block)
         self.block_index[block.hash] = block
         return None
 
     def reorganize_to(self, block):
-        print('reorg to', block.hash, 'from', self.head.hash)
+        print('reorg from %064x\nto         %064x\n' % (self.head.hash, block.hash))
         pivot = self.find_pivot(self.head, block)
         self.mass_unapply(Graph.order_from(pivot, self.head)[1:])
         self.mass_apply(Graph.order_from(pivot, block)[1:])
@@ -141,7 +188,7 @@ class Graph:
     def mass_unapply(self, path):
         for block in path[::-1]:
             self.unapply_to_state(block)
-            self.orphans.add(block)
+            self.orphans.put((block.sigmadiff, block))
 
     def mass_apply(self, path):
         for block in path:
@@ -155,7 +202,7 @@ class Graph:
 
     @staticmethod
     def order_from(early_node, late_node, carry=None):
-        carry = [] if not carry else carry
+        carry = [] if carry is None else carry
         if early_node == late_node:
             return [late_node]
         if late_node.parent_hash == 0:
@@ -307,7 +354,7 @@ def storage_fee(block):
 # P2P Setup
 
 port = 2281
-seeds = [('198.199.102.43', port)]
+seeds = [('198.199.102.43', port-1  ), ('127.0.0.1', port)]
 p2p = Spore(seeds, ('0.0.0.0', port))
 
 # P2P Messages

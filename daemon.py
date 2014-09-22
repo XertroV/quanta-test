@@ -1,15 +1,21 @@
+import sys
+from random import randint
+
 from quanta import *
 from mine import *
 
 @p2p.on_connect
 def handle_connect(peer):
-    print('Connected to', peer)
+    print(peer.__str__())
 
 if __name__ == "__main__":
     try:
-        miner = Miner(graph, p2p, True)
-        miner.start(0)
+        _mining = "-mine" in sys.argv
+        if _mining:
+            miner = Miner(graph, p2p, True)
+            miner.start(randint(0,1000000))
         p2p.run()
-    except KeyboardInterrupt:
-        miner.stop()
+    finally:
+        if _mining:
+            miner.stop()
         p2p.shutdown()

@@ -9,6 +9,7 @@ class Miner:
         self._special_nonce = 1234567890
         self._run_forever = run_forever
         self._p2p = p2p
+        self._running = False
 
     def set_graph(self, graph):
         self._graph = graph
@@ -32,6 +33,7 @@ class Miner:
 
     def _start_mining(self, candidate):
 
+        # hack to replace a known special nonce, increase hash rate by modifying serialized blocks.
         m1, m2 = map(bytes,
                      candidate.serialize().split(
                          str(self._special_nonce).encode())
